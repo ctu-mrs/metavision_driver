@@ -119,14 +119,10 @@ public:
     const int64_t ros_tdiff =
       static_cast<int64_t>(rosT) - static_cast<int64_t>(trialTime) - bufferingDelay_;
     if (std::abs(ros_tdiff) > 10000000LL) {
-#ifdef USING_ROS_1
-      LOG_WARN_NAMED_FMT_THROTTLE(5000, "ROS timestamp off by: %.2fms", ros_tdiff * 1e-6);
-#else
       rclcpp::Clock clock;
       RCLCPP_WARN_THROTTLE(
         rclcpp::get_logger(loggerName_), clock, 5000, "ROS timestamp off by: %.2fms",
         ros_tdiff * 1e-6);
-#endif
     }
 
     const uint64_t rosTimeOffset = rosT0_ + avg_timediff_int + bufferingDelay_;

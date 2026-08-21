@@ -39,11 +39,7 @@
 #include <set>
 #include <thread>
 
-#ifdef USING_ROS_1
-#define GENERIC_ROS_OK() (ros::ok())
-#else
 #define GENERIC_ROS_OK() (rclcpp::ok())
-#endif
 
 #include "metavision_driver/logging.h"
 
@@ -717,7 +713,6 @@ void MetavisionWrapper::printStatistics()
   const int recvMsgRate = static_cast<int>(stats.msgsRecv * invT);
   const int sendMsgRate = static_cast<int>(stats.msgsSent * invT);
 
-#ifndef USING_ROS_1
   if (useMultithreading_) {
     LOG_INFO_NAMED_FMT(
       "bw in: %9.5f MB/s, msgs/s in: %7d, "
@@ -729,17 +724,6 @@ void MetavisionWrapper::printStatistics()
       "out: %7d",
       recvByteRate, recvMsgRate, sendMsgRate);
   }
-#else
-  if (useMultithreading_) {
-    LOG_INFO_NAMED_FMT(
-      "%s: bw in: %9.5f MB/s, msgs/s in: %7d, out: %7d, maxq: %4zu", loggerName_.c_str(),
-      recvByteRate, recvMsgRate, sendMsgRate, stats.maxQueueSize);
-  } else {
-    LOG_INFO_NAMED_FMT(
-      "%s: bw in: %9.5f MB/s, msgs/s in: %7d, out: %7d", loggerName_.c_str(), recvByteRate,
-      recvMsgRate, sendMsgRate);
-  }
-#endif
   stats_ = Stats();  // reset statistics
 }
 

@@ -17,26 +17,11 @@ cmake_minimum_required(VERSION 3.16)
 project(metavision_driver)
 
 #
-# figure out ROS1 vs ROS2
+# ROS2 only. ROS1 support was removed from this fork.
 #
-if(DEFINED ENV{ROS_VERSION})
-  set(ROS_VERSION "$ENV{ROS_VERSION}")
-  message(STATUS "using env variable ROS_VERSION: ${ROS_VERSION}")
-else()
-  find_package(catkin QUIET)
-  if(catkin_FOUND)
-    message(STATUS "found catkin package, must be ROS1!")
-    set(ROS_VERSION "1")
-  else()
-    message(STATUS "catkin package not found, must be ROS2!")
-    set(ROS_VERSION "2")
-  endif()
+if(DEFINED ENV{ROS_VERSION} AND NOT "$ENV{ROS_VERSION}" STREQUAL "2")
+  message(SEND_ERROR
+    "this fork supports ROS2 only, but ROS_VERSION=$ENV{ROS_VERSION}")
 endif()
 
-if(ROS_VERSION EQUAL "2")
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ROS2.cmake)
-elseif(ROS_VERSION EQUAL "1")
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ROS1.cmake)
-else()
-  message(SEND_ERROR "invalid ROS_VERSION: ${ROS_VERSION}")
-endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ROS2.cmake)
