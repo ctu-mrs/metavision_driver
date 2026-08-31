@@ -1,0 +1,214 @@
+# metavision-sdk.def
+
+#
+# ---------------------------------------------------------------------------
+# BUILD (sandbox mode — writable, editable later without re-touching the
+# JFrog token; recommended while actively developing)
+# ---------------------------------------------------------------------------
+#   # jfrog.args holds JFROG_USER=... / JFROG_TOKEN=... — see chat history,
+#   # never commit this file, delete it right after the build.
+#   sudo apptainer build --sandbox --build-arg-file jfrog.args mv-sandbox/ metavision-sdk.def
+#   rm jfrog.args
+#
+# Later, to add more system packages without touching the JFrog repo again:
+#   sudo apptainer shell --writable mv-sandbox/
+#   # ... apt install whatever, exit ...
+#
+# Optional: once the sandbox is stable, freeze it into a compressed
+# read-only .sif for sharing/archiving:
+#   sudo apptainer build metavision-sdk.sif mv-sandbox/
+#
+# ---------------------------------------------------------------------------
+# RUN
+# ---------------------------------------------------------------------------
+#   ./mv-shell.sh                              # interactive shell (see below)
+#   apptainer exec mv-sandbox/ metavision_platform_info
+#
+# $HOME, /tmp, /proc, /sys, /dev and the current directory are bound from the
+# host automatically (Apptainer default), so host files and camera device
+# nodes under /dev are visible inside the container without extra flags.
+# GUI apps (Metavision Studio) additionally need --bind /run/user/$(id -u)
+# for X11/Xauthority to work on Ubuntu 24.04's GDM/Xwayland sessions — see
+# mv-shell.sh, which bakes this in. Add --bind /host/path:/cont/path for
+# anything else outside the default-bound paths. If Studio's OpenGL
+# rendering looks wrong/slow against an NVIDIA host driver, add --nv at run
+# time (no rebuild needed; ./mv-shell.sh --nv works too).
+#
+# NOTE on camera access: the udev rules that grant USB permissions for the
+# camera must be installed on the HOST (udev is a host-kernel service and
+# does not run inside the container) — the apt packages do NOT install
+# these. Get the rule files from ~/metavision_driver/udev/rules.d/ (or
+# https://github.com/prophesee-ai/openeb) and:
+#   sudo cp udev/rules.d/*.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# Then unplug/replug the camera and confirm: lsusb (look for Cypress FX3
+# 04b4, ST EVK2 03fd, or CenturyArks 31f7) and
+# ls -la /dev/bus/usb/*/*  (should read crw-rw-rw- for the camera's node).
+#
+# If metavision_platform_info / Studio can't open a camera it can otherwise
+# see (rules already installed, permissions look fine), the USB controller
+# is likely wedged from a previous ungraceful close — a crashed process or
+# a killed container session can leave it in this state. Fix: physically
+# unplug and replug the camera to force a real re-enumeration (confirm via
+# lsusb that the Bus/Device number changed), then retry. This is *not* a
+# udev/rules problem and re-touching the rules will not fix it.
+#
+# ---------------------------------------------------------------------------
+# PYTHON VENV (per Prophesee docs — must be created/used from *inside* the
+# container so it can see the system-installed SDK bindings; the venv
+# itself lives under $HOME so it persists across container runs).
+# --without-pip sidesteps an ensurepip issue with the Ubuntu venv module;
+# pip is still usable via --system-site-packages once python3-pip is
+# installed (both are apt-installed in %post below).
+# ---------------------------------------------------------------------------
+#   apptainer exec mv-sandbox/ python3 -m venv ~/prophesee/py3venv --system-site-packages --without-pip
+#   ./mv-shell.sh
+#     source ~/prophesee/py3venv/bin/activate
+#     export PYTHONNOUSERSITE=true
+#     python -m pip install -r /usr/share/metavision/python_requirements/requirements_openeb.txt
+#     # note: use `python -m pip`, not bare `pip` (--without-pip venvs have
+#     # no pip script; the module still resolves via system-site-packages)
+# ---------------------------------------------------------------------------
+
+Bootstrap: docker
+From: ubuntu:24.04
+
+%arguments
+    JFROG_USER=
+    JFROG_TOKEN=
+
+%post
+    set -eu
+    # Apptainer runs this section with shell tracing (-x) on, which echoes
+    # every command to the build log *after* {{ }} template substitution —
+    # i.e. it would print your JFrog email/token in plaintext. Turn tracing
+    # off before anything touches those values.
+    set +x
+    export DEBIAN_FRONTEND=noninteractive
+
+    if [ -z "{{ JFROG_USER }}" ] || [ -z "{{ JFROG_TOKEN }}" ]; then
+        echo "ERROR: JFROG_USER and JFROG_TOKEN build-args are required." >&2
+        echo "Build with: apptainer build --build-arg-file jfrog.args metavision-sdk.sif metavision-sdk.def" >&2
+        exit 1
+    fi
+
+    apt-get -y update
+    apt-get -y install --no-install-recommends \
+        curl \
+        ca-certificates \
+        gnupg \
+        software-properties-common
+
+    # --- GPG key ---------------------------------------------------------
+    curl -L https://propheseeai.jfrog.io/artifactory/api/security/keypair/prophesee-gpg/public \
+        -o /tmp/propheseeai.jfrog.op.asc
+    cp /tmp/propheseeai.jfrog.op.asc /etc/apt/trusted.gpg.d/
+    rm -f /tmp/propheseeai.jfrog.op.asc
+
+    # --- Apt repo (older-account URL, no "-nc" suffix) --------------------
+    add-apt-repository -y \
+        "https://{{ JFROG_USER }}:{{ JFROG_TOKEN }}@propheseeai.jfrog.io/artifactory/metavision-sdk-5-debian/"
+
+    apt-get -y update
+
+    # --- Pre-accept the Advanced-tier license notice -----------------------
+    # metavision-sdk-advanced-license's postinst is gated on the debconf
+    # boolean metavision-sdk-advanced/license_change_notice. Under
+    # DEBIAN_FRONTEND=noninteractive that question is never answered
+    # (defaults to unset/false), so the postinst does `exit 1` and dpkg
+    # fails — regardless of container vs. bare-metal install. Pre-seed it.
+    echo "metavision-sdk-advanced metavision-sdk-advanced/license_change_notice boolean true" \
+        | debconf-set-selections
+
+    # --- Guard against postinst scripts calling a service manager / udev --
+    # Some packages (e.g. metavision-sdk-advanced-license) ship postinst
+    # hooks that call systemctl/udevadm/service, which don't work during a
+    # container build (no init system, no running udev daemon) and make
+    # dpkg fail with "post-installation script subprocess returned error
+    # exit status 1". Stub these out for the duration of the install, then
+    # restore the real binaries afterwards.
+    printf '#!/bin/sh\nexit 0\n' > /usr/sbin/policy-rc.d
+    chmod +x /usr/sbin/policy-rc.d
+    for bin in systemctl udevadm invoke-rc.d service; do
+        real="$(command -v "$bin" 2>/dev/null)" || continue
+        mv "$real" "${real}.real"
+        printf '#!/bin/sh\nexit 0\n' > "$real"
+        chmod +x "$real"
+    done
+
+    apt-get -y install metavision-sdk
+
+    # --- Dependencies ------------------------------------------------------
+    # usbutils (lsusb) is here purely as an in-container diagnostic for
+    # camera USB issues (see NOTE on camera access, above).
+    apt-get -y install --no-install-recommends \
+        libcanberra-gtk-module mesa-utils ffmpeg \
+        cmake libboost-program-options-dev libeigen3-dev \
+        libprotobuf-dev protobuf-compiler usbutils
+
+    # --- Python venv toolchain ----------------------------------------------
+    # metavision-sdk-python doesn't pull in a complete venv/ensurepip
+    # toolchain by itself; `python3 -m venv` fails with "ensurepip is not
+    # available" without these. python3-pip also lets a --without-pip venv
+    # (see %help) pick up pip via --system-site-packages, sidestepping
+    # ensurepip entirely.
+    apt-get -y install --no-install-recommends python3-pip python3.12-venv
+
+    # --- Restore the stubbed binaries --------------------------------------
+    for bin in systemctl udevadm invoke-rc.d service; do
+        p="$(command -v "$bin" 2>/dev/null)" || continue
+        [ -f "${p}.real" ] && mv "${p}.real" "$p"
+    done
+    rm -f /usr/sbin/policy-rc.d
+
+    # --- Scrub the embedded credentials out of the image -------------------
+    grep -rl "{{ JFROG_TOKEN }}" /etc/apt/sources.list.d/ 2>/dev/null | \
+        xargs -r sed -i "s#{{ JFROG_USER }}:{{ JFROG_TOKEN }}@#{{ JFROG_USER }}:REDACTED@#g" || true
+    grep -rl "{{ JFROG_TOKEN }}" /etc/apt/ -R 2>/dev/null | \
+        xargs -r sed -i "s#{{ JFROG_TOKEN }}#REDACTED#g" || true
+
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+%environment
+    export LC_ALL=C
+    export MV_HAL_PLUGIN_PATH=/usr/lib/metavision/hal/plugins
+
+%test
+    dpkg -l | grep -q metavision-sdk && echo "metavision-sdk package present"
+
+%labels
+    Author metavision-sdk.def
+    Base ubuntu:24.04
+    Source https://docs.prophesee.ai/stable/installation/linux.html
+
+%help
+    Container with Prophesee Metavision SDK installed on Ubuntu 24.04.
+
+    Build as a writable sandbox :
+        apptainer build --sandbox --build-arg-file jfrog.args mv-sandbox/ metavision-sdk.def
+
+    Run:
+        ./mv-shell.sh                              # interactive shell (X11-ready)
+        apptainer exec mv-sandbox/ metavision_platform_info
+
+    Host $HOME/tmp/dev/etc. are bound automatically, so host files and
+    camera devices are visible without extra flags. Metavision Studio (GUI)
+    additionally needs --bind /run/user/$(id -u) for X11 auth on Ubuntu
+    24.04 — mv-shell.sh already includes it. Camera access still requires
+    host-side udev rules (udev doesn't run inside the container) — see the
+    NOTE on camera access, above, for where to get them and how to install.
+    If a camera the rules already cover still won't open, physically
+    unplug/replug it first (wedged USB controller from a prior crash) —
+    that is a far more common cause than a rules problem.
+
+    Python: create the venv from inside the container with
+    --system-site-packages --without-pip, then use `python -m pip` (not
+    bare `pip`) once activated — see the PYTHON VENV header comment in
+    this .def for the exact commands.
+
+    To add packages later without re-touching the JFrog repo:
+        apptainer shell --writable mv-sandbox/
+
+    To freeze the sandbox into a shareable read-only image later:
+        apptainer build metavision-sdk.sif mv-sandbox/
